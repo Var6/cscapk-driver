@@ -1,7 +1,8 @@
 {
   "expo": {
-    "name": "cscapk-driver",
+    "name": "CSC Driver",
     "slug": "cscapk-driver",
+    "scheme": "cscapkdriver",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -10,21 +11,41 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0f172a"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.csctravels.driver",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "We use your location to show nearby trips and guide you to pickups."
+      }
     },
     "android": {
+      "package": "com.csctravels.driver",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#0f172a"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow CSC Driver to use your location to find nearby trips."
+        }
+      ]
+    ],
+    "extra": {
+      "SUPABASE_URL": "",
+      "SUPABASE_ANON_KEY": ""
     }
   }
 }
