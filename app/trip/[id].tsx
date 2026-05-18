@@ -5,6 +5,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { acceptTrip, completeTrip, getTrip, startTrip, VEHICLE_EMOJI, type Trip } from '../../lib/trips';
 import { colors, spacing, radius } from '../../lib/theme';
+import { Speedometer } from '../../lib/Speedometer';
 
 type PayMethod = 'cash' | 'upi' | 'card' | 'wallet';
 
@@ -192,6 +193,12 @@ export default function TripDetail() {
             <Pressable disabled={working} onPress={onStart} style={[btn(colors.primary), { marginTop: spacing.md, marginBottom: 0 }]}>
               {working ? <ActivityIndicator color="white" /> : <Text style={btnText}>Start Trip</Text>}
             </Pressable>
+          </View>
+        )}
+
+        {inProgress && (
+          <View style={{ marginBottom: spacing.md }}>
+            <Speedometer />
           </View>
         )}
 
