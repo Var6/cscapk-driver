@@ -47,6 +47,14 @@
         }
       ]
     ],
-    "extra": {}
+    "extra": {
+      "BILLING_URL": "https://app.csctravels.com",
+      "IOS_GOOGLE_MAPS": false,
+      "router": {},
+      "eas": {
+        "projectId": "4a682879-0d37-44da-bd77-2552a02ed69d"
+      }
+    },
+    "owner": "rishabh_stark"
   }
 }
