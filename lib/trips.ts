@@ -1,113 +1,150 @@
-import { supabase } from './supabase';
+import { api } from './api';
 
-export interface Trip {
+/** Ride dispatch, trip lifecycle and offline rides — all via CSCBilling. */
+
+export interface Offer {
   id: string;
-  customer_name: string;
-  phone: string;
-  email: string | null;
+  tripNumber: string | null;
+  customerName: string;
   pickup: string;
-  drop_location: string;
-  pickup_at: string;
-  vehicle_type: 'car' | 'bus' | 'traveler';
-  trip_type: string;
-  passengers: number;
-  notes: string | null;
-  status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
-  distance_km: number | null;
-  estimated_fare: number | null;
-  final_fare: number | null;
-  driver_id: string | null;
-  start_odometer: number | null;
-  end_odometer: number | null;
-  actual_start_at: string | null;
-  actual_end_at: string | null;
-  payment_method: 'cash' | 'upi' | 'card' | 'wallet' | null;
-  payment_status: 'pending' | 'paid';
-  pickup_lat: number | null;
-  pickup_lng: number | null;
-  drop_lat: number | null;
-  drop_lng: number | null;
-  created_at: string;
+  dropoff: string;
+  pickupLat: number | null;
+  pickupLng: number | null;
+  estimatedKm: number;
+  estimatedFare: number;
+  tripKind: string | null;
+  scheduledAt: string | null;
+  distanceToPickupKm: number;
+  expiresAt: string | null;
+  /** True while this driver is inside the exclusive nearest-first window. */
+  exclusive: boolean;
 }
 
-const ALL_COLS = '*';
-
-export async function listAvailableTrips() {
-  const { data, error } = await supabase
-    .from('bookings')
-    .select(ALL_COLS)
-    .is('driver_id', null)
-    .eq('status', 'pending')
-    .order('pickup_at', { ascending: true })
-    .limit(30);
-  if (error) throw error;
-  return (data as Trip[]) ?? [];
+export interface ActiveTrip {
+  id: string;
+  tripNumber: string | null;
+  status: 'pending' | 'accepted' | 'ongoing' | 'completed' | 'cancelled';
+  source: 'app' | 'offline' | 'staff';
+  customerName: string;
+  customerPhone: string;
+  pickup: string;
+  dropoff: string;
+  pickupLat: number | null;
+  pickupLng: number | null;
+  estimatedKm: number;
+  estimatedFare: number;
+  tripKind: string | null;
+  startOdometer: number | null;
+  endOdometer: number | null;
+  meteredKm: number | null;
+  gpsKm: number;
+  totalFare: number;
+  paymentMethod: string | null;
+  paymentStatus: string | null;
+  otp: string | null;
+  flagged: boolean;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
 }
 
-export async function listMyTrips(driverId: string) {
-  const { data, error } = await supabase
-    .from('bookings')
-    .select(ALL_COLS)
-    .eq('driver_id', driverId)
-    .order('created_at', { ascending: false })
-    .limit(50);
-  if (error) throw error;
-  return (data as Trip[]) ?? [];
+export interface Integrity {
+  odometerKm: number;
+  gpsKm: number;
+  variancePct: number;
+  flagged: boolean;
+  flagReasons: string[];
 }
 
-export async function getTrip(id: string) {
-  const { data, error } = await supabase
-    .from('bookings').select(ALL_COLS).eq('id', id).single();
-  if (error) throw error;
-  return data as Trip;
+export async function pingLocation(lat: number, lng: number, onDuty?: boolean) {
+  return api<{ success: true; onDuty: boolean; activeTripId: string | null; gpsKm: number | null }>(
+    '/api/driver/location',
+    { method: 'POST', body: { lat, lng, ...(onDuty === undefined ? {} : { onDuty }) } },
+  );
 }
 
-export async function acceptTrip(id: string, driverId: string) {
-  const { data, error } = await supabase
-    .from('bookings')
-    .update({ driver_id: driverId, status: 'confirmed' })
-    .eq('id', id)
-    .is('driver_id', null)
-    .eq('status', 'pending')
-    .select('id')
-    .single();
-  if (error) throw error;
-  return data;
+export async function fetchOffers(lat: number, lng: number) {
+  const qs = new URLSearchParams({ lat: String(lat), lng: String(lng) });
+  return api<{ success: true; offers: Offer[]; offDuty?: boolean }>(`/api/driver/offers?${qs}`);
 }
 
-export async function startTrip(id: string, startOdometer: number) {
-  const { error } = await supabase
-    .from('bookings')
-    .update({
-      status: 'confirmed', // remain confirmed until completed; trip_in_progress denoted by actual_start_at
-      start_odometer: startOdometer,
-      actual_start_at: new Date().toISOString(),
-    })
-    .eq('id', id);
-  if (error) throw error;
+export async function acceptOffer(id: string) {
+  return api<{ success: true; trip: { id: string; otp: string | null; customerPhone: string } }>(
+    `/api/driver/offers/${id}/accept`,
+    { method: 'POST' },
+  );
+}
+
+export async function declineOffer(id: string) {
+  return api<{ success: true }>(`/api/driver/offers/${id}/decline`, { method: 'POST' });
+}
+
+export async function fetchActiveTrip() {
+  const res = await api<{ success: true; trip: ActiveTrip | null }>('/api/driver/trips?status=active');
+  return res.trip;
+}
+
+export interface HistorySummary {
+  count: number;
+  totalFare: number;
+  totalKm: number;
+  flagged: number;
+}
+
+export async function fetchHistory() {
+  return api<{ success: true; trips: ActiveTrip[]; summary: HistorySummary }>(
+    '/api/driver/trips?status=history',
+  );
+}
+
+export async function startTrip(id: string, startOdometer: number, at?: { lat: number; lng: number }) {
+  return api<{ success: true; trip: { startOdometer: number } }>(`/api/driver/trips/${id}/start`, {
+    method: 'POST',
+    body: { startOdometer, ...(at ?? {}) },
+  });
 }
 
 export interface CompleteInput {
   endOdometer: number;
   paymentMethod: 'cash' | 'upi' | 'card' | 'wallet';
-  finalFare: number;
+  vehicleClass?: string;
+  tollAmount?: number;
+  parkingAmount?: number;
+  nightStays?: number;
+  lat?: number;
+  lng?: number;
 }
 
 export async function completeTrip(id: string, input: CompleteInput) {
-  const { error } = await supabase
-    .from('bookings')
-    .update({
-      status: 'completed',
-      end_odometer: input.endOdometer,
-      actual_end_at: new Date().toISOString(),
-      payment_method: input.paymentMethod,
-      payment_status: 'paid',
-      final_fare: input.finalFare,
-    })
-    .eq('id', id);
-  if (error) throw error;
+  return api<{
+    success: true;
+    trip: { meteredKm: number; totalFare: number; integrity: Integrity };
+  }>(`/api/driver/trips/${id}/complete`, { method: 'POST', body: input });
 }
 
-export const VEHICLE_EMOJI: Record<Trip['vehicle_type'], string> = {
-  car: '🚗', bus: '🚌', traveler: '🚐',
-};
+export interface OfflineTripInput {
+  customerName: string;
+  customerPhone: string;
+  pickup: string;
+  dropoff: string;
+  startOdometer: number;
+  tripKind?: string;
+  riderTier?: 'public' | 'member' | 'official';
+  lat?: number;
+  lng?: number;
+}
+
+/**
+ * Opens an off-app ride. Note this STARTS the trip — the closing reading is
+ * taken later through completeTrip, so the GPS trail can be compared against
+ * the meter exactly as it is for a dispatched ride.
+ */
+export async function startOfflineTrip(input: OfflineTripInput) {
+  return api<{ success: true; trip: ActiveTrip & { startOdometer: number } }>(
+    '/api/driver/offline-trip',
+    { method: 'POST', body: input },
+  );
+}
+
+export const formatINR = (n: number) =>
+  '₹' + Math.round(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });

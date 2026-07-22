@@ -4,18 +4,19 @@ import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from '../lib/auth';
+import { DutyProvider } from '../lib/useDuty';
 
 function Gate() {
-  const { session, loading } = useAuth();
+  const { driver, loading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
 
   useEffect(() => {
     if (loading) return;
     const inAuth = segments[0] === '(auth)';
-    if (!session && !inAuth) router.replace('/(auth)/login');
-    if (session && inAuth) router.replace('/(tabs)');
-  }, [session, loading, segments]);
+    if (!driver && !inAuth) router.replace('/(auth)/login');
+    if (driver && inAuth) router.replace('/(tabs)');
+  }, [driver, loading, segments]);
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
@@ -31,8 +32,11 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <AuthProvider>
-          <Gate />
-          <StatusBar style="light" />
+          {/* Inside AuthProvider — the heartbeat needs a signed-in driver. */}
+          <DutyProvider>
+            <Gate />
+            <StatusBar style="light" />
+          </DutyProvider>
         </AuthProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

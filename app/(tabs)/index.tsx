@@ -1,221 +1,316 @@
-import { useCallback, useState } from 'react';
-import { View, Text, ScrollView, Pressable, RefreshControl, ActivityIndicator, Alert } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  View, Text, Pressable, ScrollView, ActivityIndicator, Switch, Alert, RefreshControl,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter, useFocusEffect } from 'expo-router';
-import { useAuth, type DriverStatus } from '../../lib/auth';
-import { listAvailableTrips, listMyTrips, VEHICLE_EMOJI, type Trip } from '../../lib/trips';
+import { useRouter } from 'expo-router';
+import { useAuth } from '../../lib/auth';
+import { useDuty } from '../../lib/useDuty';
+import {
+  acceptOffer, declineOffer, fetchActiveTrip, fetchOffers, formatINR,
+  type ActiveTrip, type Offer,
+} from '../../lib/trips';
 import { colors, spacing, radius } from '../../lib/theme';
 
-const STATUS_META: Record<DriverStatus, { label: string; color: string; bg: string }> = {
-  available: { label: 'Available',  color: '#065f46', bg: '#d1fae5' },
-  on_trip:   { label: 'On a trip',  color: '#1e40af', bg: '#dbeafe' },
-  offline:   { label: 'Offline',    color: '#374151', bg: '#e5e7eb' },
-};
+/** How often the offer feed refreshes while on duty. */
+const POLL_MS = 5000;
 
 export default function Dashboard() {
-  const { driver, driverNotFound, setStatus, refresh } = useAuth();
+  const { driver } = useAuth();
+  const { onDuty, position, permission, toggleDuty, pingNow } = useDuty();
   const router = useRouter();
-  const [available, setAvailable] = useState<Trip[]>([]);
-  const [mine, setMine] = useState<Trip[]>([]);
+
+  const [offers, setOffers] = useState<Offer[]>([]);
+  const [active, setActive] = useState<ActiveTrip | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  async function load() {
-    if (!driver) { setLoading(false); return; }
+  // Re-render once a second so the offer countdowns actually tick.
+  const [, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const load = useCallback(async () => {
     try {
-      const [a, m] = await Promise.all([listAvailableTrips(), listMyTrips(driver.id)]);
-      setAvailable(a);
-      setMine(m);
-    } catch (e) {
-      console.warn(e);
+      const trip = await fetchActiveTrip();
+      setActive(trip);
+
+      // A driver already on a ride should not be shown more work.
+      if (trip || !onDuty || !position) {
+        setOffers([]);
+        return;
+      }
+
+      const res = await fetchOffers(position.lat, position.lng);
+      setOffers(res.offers);
+      setNotice(null);
+    } catch (e: any) {
+      // status 0 is a network blip — the next tick usually recovers.
+      if (e?.status !== 0) setNotice(e?.message ?? null);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
+  }, [onDuty, position]);
+
+  // Poll while the screen is mounted. Chained timeout rather than an interval,
+  // so a slow response cannot stack requests up on bad mobile data.
+  const loadRef = useRef(load);
+  useEffect(() => { loadRef.current = load; }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const tick = async () => {
+      if (cancelled) return;
+      await loadRef.current();
+      if (!cancelled) timer = setTimeout(tick, POLL_MS);
+    };
+
+    tick();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, []);
+
+  async function onAccept(offer: Offer) {
+    setBusyId(offer.id);
+    try {
+      const res = await acceptOffer(offer.id);
+      await pingNow();
+      await load();
+      Alert.alert(
+        'Ride accepted',
+        `${offer.customerName}\n${offer.pickup}\n\n` +
+          (res.trip.otp ? `Pickup OTP: ${res.trip.otp}\n` : '') +
+          `Phone: ${res.trip.customerPhone}`,
+        [{ text: 'Open trip', onPress: () => router.push(`/trip/${res.trip.id}`) }],
+      );
+    } catch (e: any) {
+      // 409 is the normal race outcome — another driver got there first.
+      Alert.alert(e?.status === 409 ? 'Already taken' : 'Could not accept', e?.message ?? 'Try again');
+      await load();
+    } finally {
+      setBusyId(null);
+    }
   }
 
-  useFocusEffect(useCallback(() => { setLoading(true); load(); }, [driver?.id]));
-
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const todayTrips = mine.filter((t) => t.actual_end_at && new Date(t.actual_end_at) >= today);
-  const todayEarnings = todayTrips.reduce((sum, t) => sum + (t.final_fare ?? 0), 0);
-  const todayKm = todayTrips.reduce((sum, t) => {
-    if (t.start_odometer != null && t.end_odometer != null) return sum + (t.end_odometer - t.start_odometer);
-    return sum + (t.distance_km ?? 0);
-  }, 0);
-  const activeTrip = mine.find((t) => t.status === 'confirmed' && t.actual_start_at && !t.actual_end_at);
-
-  if (driverNotFound) {
-    return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.bgSoft, padding: spacing.xl, justifyContent: 'center' }}>
-        <Text style={{ fontSize: 22, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: spacing.md }}>
-          Driver profile not set up
-        </Text>
-        <Text style={{ color: colors.textMuted, textAlign: 'center' }}>
-          Your account is signed in, but no driver record was found. Contact CSC Travels admin to be added to the fleet.
-        </Text>
-      </SafeAreaView>
-    );
+  async function onDecline(offer: Offer) {
+    setBusyId(offer.id);
+    // Drop it locally straight away — the server will not re-offer it.
+    setOffers((list) => list.filter((o) => o.id !== offer.id));
+    try {
+      await declineOffer(offer.id);
+    } catch {
+      await load();
+    } finally {
+      setBusyId(null);
+    }
   }
 
   if (loading) {
     return (
-      <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.bgSoft }}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.bgSoft, alignItems: 'center', justifyContent: 'center' }}>
         <ActivityIndicator color={colors.primary} />
       </SafeAreaView>
     );
   }
 
-  const meta = driver ? STATUS_META[driver.status] : STATUS_META.offline;
-
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bgSoft }} edges={['top']}>
       <ScrollView
-        contentContainerStyle={{ paddingBottom: spacing.xl }}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl, gap: spacing.md }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => { setRefreshing(true); load(); }}
+            tintColor={colors.primary}
+          />
+        }
       >
-        {/* Header */}
-        <View style={{ backgroundColor: colors.primary, padding: spacing.lg, paddingBottom: spacing.xl, borderBottomLeftRadius: 28, borderBottomRightRadius: 28 }}>
-          <Text style={{ color: '#94a3b8', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, fontWeight: '700' }}>Welcome back</Text>
-          <Text style={{ color: 'white', fontSize: 24, fontWeight: '800', marginTop: 2 }}>{driver?.full_name ?? '—'}</Text>
-          <Text style={{ color: '#cbd5e1', fontSize: 13, marginTop: 2 }}>{driver?.vehicle_plate ?? 'No vehicle assigned'}</Text>
+        {/* Duty */}
+        <View style={{ backgroundColor: colors.primary, borderRadius: radius.lg, padding: spacing.lg }}>
+          <Text style={{ color: '#94a3b8', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8 }}>
+            {driver?.name ?? 'Driver'}
+          </Text>
+          <Text style={{ color: 'white', fontSize: 20, fontWeight: '800', marginTop: 2 }}>
+            {driver?.vehicle ? `Vehicle ${driver.vehicle}` : 'No vehicle assigned'}
+          </Text>
 
-          {/* Status toggle */}
-          <View style={{ flexDirection: 'row', backgroundColor: '#1e293b', borderRadius: radius.pill, padding: 4, marginTop: spacing.lg }}>
-            {(['available', 'offline'] as DriverStatus[]).map((s) => (
-              <Pressable
-                key={s}
-                onPress={() => setStatus(s)}
-                disabled={driver?.status === 'on_trip'}
-                style={({ pressed }) => ({
-                  flex: 1, paddingVertical: spacing.sm, borderRadius: radius.pill,
-                  backgroundColor: driver?.status === s ? colors.accent : 'transparent',
-                  alignItems: 'center', opacity: pressed ? 0.7 : 1,
-                })}
-              >
-                <Text style={{ color: driver?.status === s ? 'white' : '#94a3b8', fontWeight: '700' }}>
-                  {s === 'available' ? '🟢 Go Online' : '⚫ Go Offline'}
-                </Text>
-              </Pressable>
-            ))}
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: spacing.lg }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: 'white', fontWeight: '800', fontSize: 16 }}>
+                {onDuty ? '🟢 On duty' : '⚪ Off duty'}
+              </Text>
+              <Text style={{ color: '#94a3b8', fontSize: 12, marginTop: 2 }}>
+                {onDuty ? 'You are receiving ride requests' : 'Go on duty to start receiving rides'}
+              </Text>
+            </View>
+            <Switch
+              value={onDuty}
+              onValueChange={toggleDuty}
+              trackColor={{ false: '#334155', true: colors.success }}
+              thumbColor="#ffffff"
+            />
           </View>
 
-          <View style={{ marginTop: spacing.sm, alignSelf: 'flex-start', backgroundColor: meta.bg, paddingHorizontal: spacing.md, paddingVertical: 4, borderRadius: radius.pill }}>
-            <Text style={{ color: meta.color, fontWeight: '700', fontSize: 12 }}>{meta.label}</Text>
+          {permission === 'denied' && (
+            <View style={{ backgroundColor: 'rgba(239,68,68,0.2)', borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md }}>
+              <Text style={{ color: '#fca5a5', fontSize: 12 }}>
+                Location permission is off. Rides go to the nearest driver, so you will not receive
+                any until you enable it in Settings.
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {notice && (
+          <View style={{ backgroundColor: '#fef3c7', borderRadius: radius.md, padding: spacing.md }}>
+            <Text style={{ color: '#92400e', fontSize: 13 }}>{notice}</Text>
           </View>
-        </View>
-
-        {/* Today's stats */}
-        <View style={{ flexDirection: 'row', marginHorizontal: spacing.lg, marginTop: -16, gap: spacing.sm }}>
-          <Stat label="Today's trips" value={todayTrips.length.toString()} />
-          <Stat label="Today's KM" value={todayKm.toFixed(1)} />
-          <Stat label="Earnings" value={`₹${todayEarnings.toLocaleString('en-IN')}`} />
-        </View>
-
-        {/* Active trip card */}
-        {activeTrip && (
-          <Pressable
-            onPress={() => router.push({ pathname: '/trip/[id]', params: { id: activeTrip.id } })}
-            style={({ pressed }) => ({
-              margin: spacing.lg, padding: spacing.lg, borderRadius: radius.lg,
-              backgroundColor: colors.accent, opacity: pressed ? 0.85 : 1,
-            })}
-          >
-            <Text style={{ color: 'white', fontWeight: '800', fontSize: 14, opacity: 0.9 }}>
-              {VEHICLE_EMOJI[activeTrip.vehicle_type]} TRIP IN PROGRESS
-            </Text>
-            <Text style={{ color: 'white', fontWeight: '700', fontSize: 18, marginTop: 4 }}>
-              {activeTrip.customer_name}
-            </Text>
-            <Text style={{ color: 'white', opacity: 0.95, marginTop: 4 }} numberOfLines={1}>
-              {activeTrip.pickup} → {activeTrip.drop_location}
-            </Text>
-            <Text style={{ color: 'white', fontWeight: '700', marginTop: spacing.sm, textAlign: 'right' }}>
-              Tap to complete →
-            </Text>
-          </Pressable>
         )}
 
-        {/* My upcoming */}
-        <Section title="My Trips">
-          {mine.filter((t) => t.status !== 'completed' && t.status !== 'cancelled' && t.id !== activeTrip?.id).length === 0 ? (
-            <Empty text="No assigned trips" />
-          ) : (
-            mine
-              .filter((t) => t.status !== 'completed' && t.status !== 'cancelled' && t.id !== activeTrip?.id)
-              .map((t) => <TripCard key={t.id} trip={t} onPress={() => router.push({ pathname: '/trip/[id]', params: { id: t.id } })} />)
-          )}
-        </Section>
+        {/* An active trip takes over — nothing else matters mid-ride. */}
+        {active ? (
+          <Pressable
+            onPress={() => router.push(`/trip/${active.id}`)}
+            style={({ pressed }) => ({
+              backgroundColor: 'white', borderRadius: radius.lg, padding: spacing.lg,
+              borderWidth: 2, borderColor: colors.accent, opacity: pressed ? 0.8 : 1,
+            })}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={{ fontWeight: '800', color: colors.accent, fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.8 }}>
+                {active.status === 'ongoing' ? '● Trip in progress' : '● Ride accepted'}
+              </Text>
+              {active.source === 'offline' && (
+                <Text style={{ fontSize: 10, fontWeight: '700', color: colors.textMuted }}>OFFLINE RIDE</Text>
+              )}
+            </View>
+            <Text style={{ fontSize: 18, fontWeight: '800', color: colors.text, marginTop: 6 }}>
+              {active.customerName}
+            </Text>
+            <Text style={{ color: colors.textMuted, fontSize: 13 }} numberOfLines={1}>🟢 {active.pickup}</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 13 }} numberOfLines={1}>🔴 {active.dropoff}</Text>
+            <Text style={{ marginTop: spacing.sm, color: colors.accent, fontWeight: '800' }}>
+              {active.status === 'ongoing' ? 'Tap to end trip →' : 'Tap to start trip →'}
+            </Text>
+          </Pressable>
+        ) : (
+          <>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text style={{ fontSize: 18, fontWeight: '800', color: colors.text }}>Ride requests</Text>
+              {onDuty && <Text style={{ fontSize: 12, color: colors.textMuted }}>Nearest first</Text>}
+            </View>
 
-        {/* Available */}
-        <Section title="Available Trips">
-          {driver?.status !== 'available' ? (
-            <Empty text="Go online to see available trips" />
-          ) : available.length === 0 ? (
-            <Empty text="No available trips right now" />
-          ) : (
-            available.map((t) => <TripCard key={t.id} trip={t} onPress={() => router.push({ pathname: '/trip/[id]', params: { id: t.id } })} />)
-          )}
-        </Section>
+            {!onDuty ? (
+              <Empty text="You are off duty. Turn on the switch above to start receiving rides." />
+            ) : offers.length === 0 ? (
+              <Empty text="No ride requests right now. New rides near you will appear here automatically." />
+            ) : (
+              offers.map((o) => (
+                <OfferCard
+                  key={o.id}
+                  offer={o}
+                  busy={busyId === o.id}
+                  onAccept={() => onAccept(o)}
+                  onDecline={() => onDecline(o)}
+                />
+              ))
+            )}
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={{ flex: 1, backgroundColor: 'white', borderRadius: radius.lg, padding: spacing.md, borderWidth: 1, borderColor: colors.border, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 2 }}>
-      <Text style={{ fontSize: 11, color: colors.textMuted, fontWeight: '700', textTransform: 'uppercase' }}>{label}</Text>
-      <Text style={{ fontSize: 18, fontWeight: '800', color: colors.text, marginTop: 2 }}>{value}</Text>
-    </View>
-  );
-}
+function OfferCard({ offer, busy, onAccept, onDecline }: {
+  offer: Offer; busy: boolean; onAccept: () => void; onDecline: () => void;
+}) {
+  const secondsLeft = offer.expiresAt
+    ? Math.max(0, Math.ceil((new Date(offer.expiresAt).getTime() - Date.now()) / 1000))
+    : null;
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <View style={{ marginTop: spacing.xl, paddingHorizontal: spacing.lg }}>
-      <Text style={{ fontSize: 16, fontWeight: '800', color: colors.text, marginBottom: spacing.sm }}>{title}</Text>
-      {children}
+    <View style={{
+      backgroundColor: 'white', borderRadius: radius.lg, padding: spacing.lg,
+      borderWidth: 1, borderColor: offer.exclusive ? colors.success : colors.border,
+    }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <View style={{ flex: 1 }}>
+          <Text style={{ fontSize: 12, fontWeight: '800', color: colors.success }}>
+            {offer.distanceToPickupKm} km away
+          </Text>
+          <Text style={{ fontSize: 17, fontWeight: '800', color: colors.text, marginTop: 2 }}>
+            {offer.customerName}
+          </Text>
+        </View>
+        <View style={{ alignItems: 'flex-end' }}>
+          <Text style={{ fontSize: 18, fontWeight: '800', color: colors.text }}>
+            {formatINR(offer.estimatedFare)}
+          </Text>
+          {offer.estimatedKm > 0 && (
+            <Text style={{ fontSize: 11, color: colors.textMuted }}>~{offer.estimatedKm.toFixed(1)} km trip</Text>
+          )}
+        </View>
+      </View>
+
+      {offer.exclusive && (
+        <View style={{
+          backgroundColor: '#dcfce7', borderRadius: radius.sm,
+          paddingHorizontal: 8, paddingVertical: 3, alignSelf: 'flex-start', marginTop: 6,
+        }}>
+          <Text style={{ color: '#166534', fontSize: 10, fontWeight: '800' }}>
+            OFFERED TO YOU FIRST{secondsLeft !== null ? ` · ${secondsLeft}s` : ''}
+          </Text>
+        </View>
+      )}
+
+      <View style={{ marginTop: spacing.md, gap: 2 }}>
+        <Text style={{ color: colors.text, fontSize: 13 }} numberOfLines={2}>🟢 {offer.pickup}</Text>
+        <Text style={{ color: colors.text, fontSize: 13 }} numberOfLines={2}>🔴 {offer.dropoff}</Text>
+      </View>
+
+      <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg }}>
+        <Pressable
+          onPress={onDecline}
+          disabled={busy}
+          style={({ pressed }) => ({
+            flex: 1, paddingVertical: spacing.md, borderRadius: radius.md,
+            borderWidth: 1, borderColor: colors.border, alignItems: 'center', opacity: pressed ? 0.7 : 1,
+          })}
+        >
+          <Text style={{ color: colors.textMuted, fontWeight: '700' }}>Decline</Text>
+        </Pressable>
+        <Pressable
+          onPress={onAccept}
+          disabled={busy}
+          style={({ pressed }) => ({
+            flex: 2, paddingVertical: spacing.md, borderRadius: radius.md,
+            backgroundColor: busy ? '#94a3b8' : colors.success, alignItems: 'center', opacity: pressed ? 0.85 : 1,
+          })}
+        >
+          {busy
+            ? <ActivityIndicator color="white" />
+            : <Text style={{ color: 'white', fontWeight: '800' }}>Accept ride</Text>}
+        </Pressable>
+      </View>
     </View>
   );
 }
 
 function Empty({ text }: { text: string }) {
   return (
-    <View style={{ padding: spacing.xl, backgroundColor: 'white', borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, alignItems: 'center' }}>
-      <Text style={{ color: colors.textMuted }}>{text}</Text>
+    <View style={{
+      backgroundColor: 'white', borderRadius: radius.lg, padding: spacing.xl,
+      alignItems: 'center', borderWidth: 1, borderColor: colors.border,
+    }}>
+      <Text style={{ fontSize: 32 }}>🚖</Text>
+      <Text style={{ color: colors.textMuted, textAlign: 'center', marginTop: spacing.sm, fontSize: 13 }}>{text}</Text>
     </View>
-  );
-}
-
-function TripCard({ trip, onPress }: { trip: Trip; onPress: () => void }) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => ({
-        backgroundColor: 'white', borderRadius: radius.lg, padding: spacing.md,
-        marginBottom: spacing.sm, borderWidth: 1, borderColor: colors.border,
-        opacity: pressed ? 0.7 : 1,
-      })}
-    >
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: spacing.xs }}>
-        <Text style={{ fontWeight: '800', color: colors.text }}>
-          {VEHICLE_EMOJI[trip.vehicle_type]} {trip.customer_name}
-        </Text>
-        <Text style={{ color: colors.textMuted, fontSize: 12 }}>
-          {new Date(trip.pickup_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}
-        </Text>
-      </View>
-      <Text style={{ color: colors.text, fontSize: 13 }} numberOfLines={1}>🟢 {trip.pickup}</Text>
-      <Text style={{ color: colors.text, fontSize: 13 }} numberOfLines={1}>🔴 {trip.drop_location}</Text>
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.sm, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border }}>
-        <Text style={{ color: colors.textMuted, fontSize: 12 }}>
-          {trip.distance_km ? `${trip.distance_km} km` : '— km'} · {trip.passengers} pax
-        </Text>
-        <Text style={{ fontWeight: '800', color: colors.accent }}>
-          {trip.estimated_fare ? `₹${trip.estimated_fare.toLocaleString('en-IN')}` : '—'}
-        </Text>
-      </View>
-    </Pressable>
   );
 }

@@ -22,6 +22,7 @@ export default function TabsLayout() {
       }}
     >
       <Tabs.Screen name="index"    options={{ title: 'Dashboard', tabBarIcon: () => <TabIcon emoji="🏠" /> }} />
+      <Tabs.Screen name="offline"  options={{ title: 'Offline',   tabBarIcon: () => <TabIcon emoji="📝" /> }} />
       <Tabs.Screen name="trips"    options={{ title: 'Trips',     tabBarIcon: () => <TabIcon emoji="🚖" /> }} />
       <Tabs.Screen name="earnings" options={{ title: 'Earnings',  tabBarIcon: () => <TabIcon emoji="💰" /> }} />
       <Tabs.Screen name="profile"  options={{ title: 'Profile',   tabBarIcon: () => <TabIcon emoji="👤" /> }} />
