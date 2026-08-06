@@ -31,6 +31,8 @@ export interface ActiveTrip {
   dropoff: string;
   pickupLat: number | null;
   pickupLng: number | null;
+  dropLat: number | null;
+  dropLng: number | null;
   estimatedKm: number;
   estimatedFare: number;
   tripKind: string | null;
@@ -41,7 +43,9 @@ export interface ActiveTrip {
   totalFare: number;
   paymentMethod: string | null;
   paymentStatus: string | null;
-  otp: string | null;
+  /** Whether this ride carries handoff codes. The codes themselves never reach
+   *  the driver — the driver must ask the rider for them. */
+  hasOtp: boolean;
   flagged: boolean;
   createdAt: string;
   startedAt: string | null;
@@ -69,11 +73,28 @@ export async function fetchOffers(lat: number, lng: number) {
 }
 
 export async function acceptOffer(id: string) {
-  return api<{ success: true; trip: { id: string; otp: string | null; customerPhone: string } }>(
+  return api<{ success: true; trip: { id: string; hasOtp: boolean; customerPhone: string } }>(
     `/api/driver/offers/${id}/accept`,
     { method: 'POST' },
   );
 }
+
+/** Straight-line km — used to decide whether the driver is at the destination. */
+export function haversineKm(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number },
+): number {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+/** Matches the server's AT_DESTINATION_KM in the complete route. */
+export const AT_DESTINATION_KM = 1.2;
 
 export async function declineOffer(id: string) {
   return api<{ success: true }>(`/api/driver/offers/${id}/decline`, { method: 'POST' });
@@ -97,16 +118,23 @@ export async function fetchHistory() {
   );
 }
 
-export async function startTrip(id: string, startOdometer: number, at?: { lat: number; lng: number }) {
+export async function startTrip(
+  id: string,
+  startOdometer: number,
+  opts?: { otp?: string; lat?: number; lng?: number },
+) {
+  const { otp, ...at } = opts ?? {};
   return api<{ success: true; trip: { startOdometer: number } }>(`/api/driver/trips/${id}/start`, {
     method: 'POST',
-    body: { startOdometer, ...(at ?? {}) },
+    body: { startOdometer, ...(otp ? { otp } : {}), ...at },
   });
 }
 
 export interface CompleteInput {
   endOdometer: number;
   paymentMethod: 'cash' | 'upi' | 'card' | 'wallet';
+  /** Required only when ending before the destination. */
+  endOtp?: string;
   vehicleClass?: string;
   tollAmount?: number;
   parkingAmount?: number;

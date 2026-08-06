@@ -7,7 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useDuty } from '../../lib/useDuty';
 import {
-  completeTrip, fetchActiveTrip, formatINR, startTrip,
+  completeTrip, fetchActiveTrip, formatINR, startTrip, haversineKm, AT_DESTINATION_KM,
   type ActiveTrip, type Integrity,
 } from '../../lib/trips';
 import { colors, spacing, radius } from '../../lib/theme';
@@ -34,6 +34,8 @@ export default function TripScreen() {
 
   const [startOdo, setStartOdo] = useState('');
   const [endOdo, setEndOdo] = useState('');
+  const [startOtp, setStartOtp] = useState('');
+  const [endOtp, setEndOtp] = useState('');
   const [payment, setPayment] = useState<Payment>('cash');
   const [toll, setToll] = useState('');
   const [parking, setParking] = useState('');
@@ -64,6 +66,11 @@ export default function TripScreen() {
       Alert.alert('Enter the odometer reading', 'Type the number showing on the meter right now.');
       return;
     }
+    // App/web rides carry a start OTP the rider reads out. No OTP on offline rides.
+    if (trip?.hasOtp && startOtp.replace(/\D/g, '').length < 4) {
+      Alert.alert('Ask the rider for their start OTP', 'Enter the 4-digit code the rider shows you to begin the ride.');
+      return;
+    }
 
     // Confirm explicitly: the server writes this once and will not take another.
     Alert.alert(
@@ -76,7 +83,11 @@ export default function TripScreen() {
           onPress: async () => {
             setBusy(true);
             try {
-              await startTrip(trip!.id, value, position ?? undefined);
+              await startTrip(trip!.id, value, {
+                otp: trip?.hasOtp ? startOtp.replace(/\D/g, '') : undefined,
+                lat: position?.lat,
+                lng: position?.lng,
+              });
               await pingNow();
               await load();
             } catch (e: any) {
@@ -112,12 +123,23 @@ export default function TripScreen() {
     const gps = trackedKm ?? trip?.gpsKm ?? 0;
     const gap = Math.abs(meterKm - gps);
 
+    // Ending before the destination needs the rider's end OTP. If we can see we
+    // are at the drop, no code is needed.
+    if (needEndOtp && endOtp.replace(/\D/g, '').length < 4) {
+      Alert.alert(
+        'Ending before the destination',
+        'You are not yet at the drop point. To end the ride here, ask the rider for their end OTP and enter it.',
+      );
+      return;
+    }
+
     const submit = async () => {
       setBusy(true);
       try {
         const res = await completeTrip(trip!.id, {
           endOdometer: value,
           paymentMethod: payment,
+          endOtp: needEndOtp ? endOtp.replace(/\D/g, '') : undefined,
           tollAmount: Number(toll) || 0,
           parkingAmount: Number(parking) || 0,
           lat: position?.lat,
@@ -219,6 +241,20 @@ export default function TripScreen() {
     ? Number(endOdo) - trip.startOdometer
     : null;
 
+  // Distance from the driver to the booked drop, if both points are known.
+  const distanceToDropKm =
+    position && trip.dropLat != null && trip.dropLng != null
+      ? haversineKm(position, { lat: trip.dropLat, lng: trip.dropLng })
+      : null;
+  const atDestination = distanceToDropKm != null && distanceToDropKm <= AT_DESTINATION_KM;
+  // Ending early on an app/web ride needs the rider's end OTP.
+  const needEndOtp = ongoing && trip.hasOtp && !atDestination;
+
+  // Navigate to the pickup before the ride starts, to the drop once it's running.
+  const navTarget = ongoing
+    ? (trip.dropLat != null && trip.dropLng != null ? { lat: trip.dropLat, lng: trip.dropLng, label: 'destination' } : null)
+    : (trip.pickupLat != null && trip.pickupLng != null ? { lat: trip.pickupLat, lng: trip.pickupLng, label: 'pickup' } : null);
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bgSoft }}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -236,11 +272,6 @@ export default function TripScreen() {
           {/* Customer */}
           <Card>
             <Text style={{ fontSize: 18, fontWeight: '800', color: colors.text }}>{trip.customerName}</Text>
-            {trip.otp && (
-              <Text style={{ color: colors.textMuted, fontSize: 13, marginTop: 2 }}>
-                Pickup OTP: <Text style={{ fontWeight: '800', color: colors.text }}>{trip.otp}</Text>
-              </Text>
-            )}
             <View style={{ marginTop: spacing.md, gap: 4 }}>
               <Text style={{ color: colors.text, fontSize: 13 }}>🟢 {trip.pickup}</Text>
               <Text style={{ color: colors.text, fontSize: 13 }}>🔴 {trip.dropoff}</Text>
@@ -253,16 +284,16 @@ export default function TripScreen() {
               >
                 <Text style={{ fontWeight: '700', color: colors.text }}>📞 Call</Text>
               </Pressable>
-              {trip.pickupLat != null && trip.pickupLng != null && (
+              {navTarget && (
                 <Pressable
                   onPress={() => Linking.openURL(
                     Platform.OS === 'ios'
-                      ? `maps://?daddr=${trip.pickupLat},${trip.pickupLng}`
-                      : `google.navigation:q=${trip.pickupLat},${trip.pickupLng}`,
+                      ? `maps://?daddr=${navTarget.lat},${navTarget.lng}`
+                      : `google.navigation:q=${navTarget.lat},${navTarget.lng}`,
                   )}
-                  style={{ flex: 1, paddingVertical: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center' }}
+                  style={{ flex: 1, paddingVertical: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 4 }}
                 >
-                  <Text style={{ fontWeight: '700', color: colors.text }}>🧭 Navigate</Text>
+                  <Text style={{ fontWeight: '700', color: colors.text }}>🧭 To {navTarget.label}</Text>
                 </Pressable>
               )}
             </View>
@@ -283,6 +314,26 @@ export default function TripScreen() {
                 placeholderTextColor={colors.textMuted}
                 style={odoInput}
               />
+
+              {trip.hasOtp && (
+                <>
+                  <SectionTitle>Rider&apos;s start OTP</SectionTitle>
+                  <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: spacing.sm }}>
+                    Ask the rider for the 4-digit code shown in their app and enter it. This confirms
+                    the right passenger is in the car.
+                  </Text>
+                  <TextInput
+                    value={startOtp}
+                    onChangeText={(t) => setStartOtp(t.replace(/\D/g, '').slice(0, 4))}
+                    keyboardType="number-pad"
+                    placeholder="• • • •"
+                    placeholderTextColor={colors.textMuted}
+                    maxLength={4}
+                    style={otpInput}
+                  />
+                </>
+              )}
+
               <Pressable
                 onPress={onStart}
                 disabled={busy}
@@ -306,6 +357,12 @@ export default function TripScreen() {
                 {liveMeterKm !== null && liveMeterKm > 0 && (
                   <Row label="Meter difference" value={`${liveMeterKm.toFixed(1)} km`} />
                 )}
+                {distanceToDropKm != null && (
+                  <Row
+                    label="Distance to destination"
+                    value={atDestination ? 'At destination ✓' : `${distanceToDropKm.toFixed(1)} km away`}
+                  />
+                )}
                 <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: spacing.sm }}>
                   Your phone is measuring this journey. The closing reading is compared against it.
                 </Text>
@@ -321,6 +378,29 @@ export default function TripScreen() {
                   placeholderTextColor={colors.textMuted}
                   style={odoInput}
                 />
+
+                {needEndOtp && (
+                  <View style={{ backgroundColor: '#fef3c7', borderRadius: radius.md, padding: spacing.md, marginTop: spacing.md }}>
+                    <Text style={{ fontWeight: '800', color: '#92400e', fontSize: 13 }}>
+                      Ending before the destination
+                    </Text>
+                    <Text style={{ color: '#92400e', fontSize: 12, marginTop: 2 }}>
+                      {distanceToDropKm != null
+                        ? `You are ${distanceToDropKm.toFixed(1)} km from the drop. `
+                        : 'Your location is not confirmed at the drop. '}
+                      Ask the rider for their end OTP to close the ride here.
+                    </Text>
+                    <TextInput
+                      value={endOtp}
+                      onChangeText={(t) => setEndOtp(t.replace(/\D/g, '').slice(0, 4))}
+                      keyboardType="number-pad"
+                      placeholder="• • • •"
+                      placeholderTextColor="#b45309"
+                      maxLength={4}
+                      style={[otpInput, { marginTop: spacing.sm, borderColor: '#f59e0b' }]}
+                    />
+                  </View>
+                )}
 
                 <SectionTitle>Payment</SectionTitle>
                 <View style={{ flexDirection: 'row', gap: spacing.xs, flexWrap: 'wrap' }}>
@@ -424,4 +504,18 @@ const smallInput = {
   paddingVertical: spacing.sm,
   fontSize: 16,
   color: colors.text,
+} as const;
+
+const otpInput = {
+  backgroundColor: 'white',
+  borderRadius: radius.md,
+  borderWidth: 2,
+  borderColor: colors.border,
+  paddingHorizontal: spacing.lg,
+  paddingVertical: spacing.md,
+  fontSize: 30,
+  fontWeight: '800',
+  color: colors.text,
+  letterSpacing: 12,
+  textAlign: 'center',
 } as const;

@@ -85,7 +85,7 @@ export default function Dashboard() {
       Alert.alert(
         'Ride accepted',
         `${offer.customerName}\n${offer.pickup}\n\n` +
-          (res.trip.otp ? `Pickup OTP: ${res.trip.otp}\n` : '') +
+          (res.trip.hasOtp ? 'Ask the rider for their start OTP at pickup.\n' : '') +
           `Phone: ${res.trip.customerPhone}`,
         [{ text: 'Open trip', onPress: () => router.push(`/trip/${res.trip.id}`) }],
       );
