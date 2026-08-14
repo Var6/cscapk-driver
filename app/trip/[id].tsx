@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, Pressable, TextInput, ActivityIndicator,
-  Alert, Linking, Platform, KeyboardAvoidingView,
+  Alert, Linking, Platform, KeyboardAvoidingView, useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useDuty } from '../../lib/useDuty';
+import { DriverMap, type LatLng, type MapPin } from '../../lib/DriverMap';
+import { Speedometer } from '../../lib/Speedometer';
 import {
   completeTrip, fetchActiveTrip, formatINR, startTrip, haversineKm, AT_DESTINATION_KM,
   type ActiveTrip, type Integrity,
@@ -26,7 +28,8 @@ const PAYMENTS: Payment[] = ['cash', 'upi', 'card', 'wallet'];
 export default function TripScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { position, trackedKm, pingNow } = useDuty();
+  const { position, heading, trail, trackedKm, pingNow } = useDuty();
+  const { height } = useWindowDimensions();
 
   const [trip, setTrip] = useState<ActiveTrip | null>(null);
   const [loading, setLoading] = useState(true);
@@ -59,6 +62,24 @@ export default function TripScreen() {
     const t = setInterval(() => { pingNow(); }, 10000);
     return () => clearInterval(t);
   }, [trip?.status, pingNow]);
+
+  // Frame the driver and the leg they are driving — once per leg, so the camera
+  // is not re-zoomed on every GPS tick. Picking up and dropping off are two
+  // separate legs, and each gets its own framing.
+  const [fit, setFit] = useState<LatLng[] | undefined>();
+  const fittedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!trip || !position) return;
+    const to = trip.status === 'ongoing'
+      ? (trip.dropLat != null && trip.dropLng != null ? { lat: trip.dropLat, lng: trip.dropLng } : null)
+      : (trip.pickupLat != null && trip.pickupLng != null ? { lat: trip.pickupLat, lng: trip.pickupLng } : null);
+    if (!to) return;
+
+    const leg = `${trip.id}:${trip.status}`;
+    if (fittedFor.current === leg) return;
+    fittedFor.current = leg;
+    setFit([position, to]);
+  }, [trip?.id, trip?.status, position]);
 
   async function onStart() {
     const value = Number(startOdo);
@@ -255,47 +276,113 @@ export default function TripScreen() {
     ? (trip.dropLat != null && trip.dropLng != null ? { lat: trip.dropLat, lng: trip.dropLng, label: 'destination' } : null)
     : (trip.pickupLat != null && trip.pickupLng != null ? { lat: trip.pickupLat, lng: trip.pickupLng, label: 'pickup' } : null);
 
+  // Pickup and drop are both shown throughout, so the driver can always see the
+  // shape of the whole job, not only the leg they are on.
+  const pins: MapPin[] = [];
+  if (trip.pickupLat != null && trip.pickupLng != null) {
+    pins.push({ id: 'pickup', at: { lat: trip.pickupLat, lng: trip.pickupLng }, kind: 'pickup', label: 'Pickup' });
+  }
+  if (trip.dropLat != null && trip.dropLng != null) {
+    pins.push({ id: 'drop', at: { lat: trip.dropLat, lng: trip.dropLng }, kind: 'drop', label: 'Drop' });
+  }
+
+  const openNavigation = () => {
+    if (!navTarget) return;
+    Linking.openURL(
+      Platform.OS === 'ios'
+        ? `maps://?daddr=${navTarget.lat},${navTarget.lng}`
+        : `google.navigation:q=${navTarget.lat},${navTarget.lng}`,
+    );
+  };
+
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+    <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <DriverMap
+        position={position}
+        heading={heading}
+        pins={pins}
+        trail={trail}
+        guideTo={navTarget ? { lat: navTarget.lat, lng: navTarget.lng } : null}
+        fit={fit}
+        style={{ height: Math.round(height * 0.38) }}
+      >
+        <SafeAreaView edges={['top']} style={{ position: 'absolute', top: 0, left: 0, right: 0 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', padding: spacing.md, gap: spacing.sm }}>
+            <Pressable
+              onPress={() => router.replace('/(tabs)')}
+              hitSlop={10}
+              style={{
+                width: 42, height: 42, borderRadius: 21, backgroundColor: 'white',
+                alignItems: 'center', justifyContent: 'center',
+                borderWidth: 1, borderColor: colors.border, elevation: 3,
+              }}
+            >
+              <Text style={{ fontSize: 18, fontWeight: '800', color: colors.text }}>✕</Text>
+            </Pressable>
+
+            <View style={{
+              backgroundColor: ongoing ? colors.accent : colors.primary,
+              borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: 8,
+            }}>
+              <Text style={{ color: 'white', fontWeight: '800', fontSize: 12 }}>
+                {ongoing ? '● Trip in progress' : '● Heading to pickup'}
+              </Text>
+            </View>
+          </View>
+        </SafeAreaView>
+
+        <View style={{
+          position: 'absolute', left: spacing.md, right: spacing.md, bottom: spacing.md,
+          flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between',
+        }}>
+          <View style={{
+            backgroundColor: 'white', borderRadius: radius.md,
+            paddingHorizontal: spacing.md, paddingVertical: 6,
+            borderWidth: 1, borderColor: colors.border, elevation: 3,
+          }}>
+            <Speedometer compact />
+          </View>
+
+          {navTarget && (
+            <Pressable
+              onPress={openNavigation}
+              style={({ pressed }) => ({
+                flexDirection: 'row', alignItems: 'center', gap: 6,
+                backgroundColor: colors.primary, borderRadius: radius.pill,
+                paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
+                opacity: pressed ? 0.85 : 1, elevation: 4,
+              })}
+            >
+              <Text style={{ color: 'white', fontWeight: '800', fontSize: 13 }}>
+                🧭 Navigate to {navTarget.label}
+              </Text>
+            </Pressable>
+          )}
+        </View>
+      </DriverMap>
+
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md, paddingBottom: spacing.xxl }}>
 
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Text style={{ fontSize: 22, fontWeight: '800', color: colors.text }}>
-              {ongoing ? 'Trip in progress' : 'Start trip'}
-            </Text>
-            <Pressable onPress={() => router.replace('/(tabs)')} hitSlop={12}>
-              <Text style={{ color: colors.textMuted, fontWeight: '700' }}>Close</Text>
-            </Pressable>
-          </View>
-
           {/* Customer */}
           <Card>
-            <Text style={{ fontSize: 18, fontWeight: '800', color: colors.text }}>{trip.customerName}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text style={{ fontSize: 18, fontWeight: '800', color: colors.text }}>{trip.customerName}</Text>
+              <Pressable
+                onPress={() => Linking.openURL(`tel:${trip.customerPhone}`)}
+                hitSlop={8}
+                style={({ pressed }) => ({
+                  flexDirection: 'row', alignItems: 'center', gap: 4,
+                  paddingHorizontal: spacing.md, paddingVertical: 8, borderRadius: radius.pill,
+                  borderWidth: 1, borderColor: colors.border, opacity: pressed ? 0.7 : 1,
+                })}
+              >
+                <Text style={{ fontWeight: '700', color: colors.text, fontSize: 13 }}>📞 Call</Text>
+              </Pressable>
+            </View>
             <View style={{ marginTop: spacing.md, gap: 4 }}>
               <Text style={{ color: colors.text, fontSize: 13 }}>🟢 {trip.pickup}</Text>
               <Text style={{ color: colors.text, fontSize: 13 }}>🔴 {trip.dropoff}</Text>
-            </View>
-
-            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg }}>
-              <Pressable
-                onPress={() => Linking.openURL(`tel:${trip.customerPhone}`)}
-                style={{ flex: 1, paddingVertical: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center' }}
-              >
-                <Text style={{ fontWeight: '700', color: colors.text }}>📞 Call</Text>
-              </Pressable>
-              {navTarget && (
-                <Pressable
-                  onPress={() => Linking.openURL(
-                    Platform.OS === 'ios'
-                      ? `maps://?daddr=${navTarget.lat},${navTarget.lng}`
-                      : `google.navigation:q=${navTarget.lat},${navTarget.lng}`,
-                  )}
-                  style={{ flex: 1, paddingVertical: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 4 }}
-                >
-                  <Text style={{ fontWeight: '700', color: colors.text }}>🧭 To {navTarget.label}</Text>
-                </Pressable>
-              )}
             </View>
           </Card>
 
@@ -449,7 +536,7 @@ export default function TripScreen() {
           )}
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
 

@@ -2,17 +2,33 @@ import { View, Text, Pressable, ScrollView, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../lib/auth';
 import { useDuty } from '../../lib/useDuty';
+import { formatHours } from '../../lib/shift';
 import { colors, spacing, radius } from '../../lib/theme';
 
 export default function Profile() {
   const { driver, signOut } = useAuth();
-  const { onDuty, permission } = useDuty();
+  const { onDuty, permission, hoursToday, hoursWeek, hoursMonth, toggleDuty } = useDuty();
 
   function confirmSignOut() {
-    Alert.alert('Sign out?', 'You will be taken off duty and stop receiving rides.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign out', style: 'destructive', onPress: () => signOut() },
-    ]);
+    Alert.alert(
+      'Sign out?',
+      onDuty
+        ? 'You will be taken off duty, your shift will be closed, and you will stop receiving rides.'
+        : 'You will stop receiving rides.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign out',
+          style: 'destructive',
+          onPress: async () => {
+            // Close the shift before the token goes, or the hours worked up to
+            // this moment sit in an open record until the cap closes it.
+            if (onDuty) await toggleDuty(false);
+            await signOut();
+          },
+        },
+      ],
+    );
   }
 
   return (
@@ -57,7 +73,21 @@ export default function Profile() {
 
         <Card title="Pay">
           <Row label="Base salary" value={`₹${(driver?.baseSalary ?? 0).toLocaleString('en-IN')}`} />
+          <Row
+            label="Duty rate"
+            value={driver?.hourlyRate ? `₹${driver.hourlyRate}/hr` : 'Set by the office'}
+          />
           <Row label="Per-km incentive" value={`₹${driver?.perKmRate ?? 0}/km`} />
+        </Card>
+
+        <Card title="Duty hours">
+          <Row label="Today" value={formatHours(hoursToday)} />
+          <Row label="This week" value={formatHours(hoursWeek)} />
+          <Row label="This month" value={formatHours(hoursMonth)} />
+          <Text style={{ fontSize: 12, color: colors.textMuted, marginTop: 4 }}>
+            Counted from when you go online to when you go offline, and sent to the office for
+            payroll. Full history is on the Earnings tab.
+          </Text>
         </Card>
 
         <Card title="Location">

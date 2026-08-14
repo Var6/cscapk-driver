@@ -17,6 +17,12 @@ export interface Driver {
   trips: number;
   baseSalary: number;
   perKmRate: number;
+  /**
+   * Duty pay, ₹ per hour. Optional because CSCBilling does not send it yet —
+   * until it does, hours are still recorded and shown, but the app will not put
+   * a rupee figure against them rather than invent a rate.
+   */
+  hourlyRate?: number;
 }
 
 interface AuthCtx {

@@ -4,6 +4,7 @@ import {
   KeyboardAvoidingView, Platform, ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
 import { useAuth } from '../../lib/auth';
 import { colors, spacing, radius } from '../../lib/theme';
 
@@ -45,6 +46,8 @@ export default function DriverLogin() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.primary }}>
+      {/* This screen is dark; the rest of the app is not. */}
+      <StatusBar style="light" />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={{ flexGrow: 1, padding: spacing.xl, justifyContent: 'center' }}>
 

@@ -35,7 +35,9 @@ export default function RootLayout() {
           {/* Inside AuthProvider — the heartbeat needs a signed-in driver. */}
           <DutyProvider>
             <Gate />
-            <StatusBar style="light" />
+            {/* Dark glyphs: the driver spends the shift on the map, which is
+                light. The login screen is dark and sets its own. */}
+            <StatusBar style="dark" />
           </DutyProvider>
         </AuthProvider>
       </SafeAreaProvider>
